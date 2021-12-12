@@ -214,4 +214,5 @@ def run():
     config_object = generate_parse_object(subparser, parser)
 
     cargs = parser.parse_args()
+    plugin_options = []
     return c.run(cargs, config_object, plugin_options)
