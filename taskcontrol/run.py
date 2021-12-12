@@ -10,7 +10,7 @@ class CLI(UtilsBase):
         super().__init__("taskcontrolcli", {}, **kwargs)
         self.create({"name": "a", "action": lambda x: print(x)})
 
-    def run(self, arg, config_object, plugin_options={"cmds": [], "runner": "None"}):
+    def run(self, arg, config_object, plugin_options=[{"cmds": ["epb"], "runner": "None"}]):
         print("Args from the command line: ", arg)
         result = None
         choices = arg.__dict__.get("CHOICES")
