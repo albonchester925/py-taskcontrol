@@ -10,10 +10,8 @@ class CLI(UtilsBase):
         super().__init__("taskcontrolcli", {}, **kwargs)
         self.create({"name": "a", "action": lambda x: print(x)})
 
-    def run(self, arg, config_object, plugin_config):
+    def run(self, arg, config_object, plugin_options={"cmds": [], "runner": "None"}):
         print("Args from the command line: ", arg)
-        # print("Config_Object from the command line: ",
-        #       config_object["add_subparsers"]["CHOICES"].__dict__)
         result = None
         choices = arg.__dict__.get("CHOICES")
         if choices in ["a", "agent"]:
@@ -32,6 +30,10 @@ class CLI(UtilsBase):
             print(choices, arg)
         elif choices in ["p", "plugin"]:
             print(choices, arg)
+
+        for i in plugin_options:
+            if choices in i.get("cmds"):
+                print(choices, arg, i.get("runner"))
         return result
 
 
@@ -212,4 +214,4 @@ def run():
     config_object = generate_parse_object(subparser, parser)
 
     cargs = parser.parse_args()
-    return c.run(cargs, config_object, plugin_config)
+    return c.run(cargs, config_object, plugin_options)
