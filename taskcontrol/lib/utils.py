@@ -2282,8 +2282,8 @@ class SocketsBase(UtilsBase, SocketsInterface):
         socket: 
         """
         self.v = {
-            "create": ["name", "protocol", "streammode", "host", "port", "numbers", "handler", "blocking", "nonblocking_data", "nonblocking_timeout", "server"],
-            "add": ["name", "protocol", "streammode", "host", "port", "numbers", "handler", "blocking", "nonblocking_data", "nonblocking_timeout", "workflow_kwargs", "server"],
+            "create": ["name", "protocol", "streammode", "host", "port", "numbers", "handler", "blocking", "nonblocking_data", "nonblocking_timeout", "server", "close_server"],
+            "add": ["name", "protocol", "streammode", "host", "port", "numbers", "handler", "blocking", "nonblocking_data", "nonblocking_timeout", "workflow_kwargs", "server", "close_server"],
             "fetch": ["name"],
             "update": ["name"],
             "delete": ["name"]
@@ -2312,6 +2312,7 @@ class SocketsBase(UtilsBase, SocketsInterface):
         """
         sel = selectors.DefaultSelector()
         socket_object = self.fetch(socket_name)
+        socket_object["selectors"] = sel
         blocking = socket_object.get("blocking", False)
         srv = socket_object.get("server")
         srv.bind((socket_object.get("host"), socket_object.get("port")))
@@ -2331,6 +2332,7 @@ class SocketsBase(UtilsBase, SocketsInterface):
         srv = socket_object.get("server")
         sel = socket_object.get("selectors")
         blocking = socket_object.get("blocking")
+        print(socket_object)
         while True and srv:
             if blocking:
                 try:
@@ -2346,6 +2348,8 @@ class SocketsBase(UtilsBase, SocketsInterface):
                     except Exception as e:
                         pass
                     print("Closing connection to client", str(addr))
+                    if socket_object.get("close_server", True):
+                        break
                 except KeyboardInterrupt:
                     print("Exiting due to keyboard interrupt")
                 except Exception as e:
@@ -2355,7 +2359,7 @@ class SocketsBase(UtilsBase, SocketsInterface):
                     try:
                         # Should be ready to read
                         conn, addr = sock.accept()  # Should be ready to read
-                        print("accepted connection from", addr)
+                        print("Accepted connection from ", addr)
                         # conn.setblocking(False)
                         data = types.SimpleNamespace(
                             addr=addr, inb=b"", outb=b"")
@@ -2367,10 +2371,11 @@ class SocketsBase(UtilsBase, SocketsInterface):
                         # raise e
                         return False
 
-                def service_connection(key, mask, sel, self):
+                def service_connection(key, mask, socket_object, self):
                     try:
                         sock = key.fileobj
                         data = key.data
+                        sel = socket_object.get("selectors")
                         if mask & selectors.EVENT_READ:
                             # Should be ready to read
                             recv_data = sock.recv(1024)
@@ -2401,11 +2406,11 @@ class SocketsBase(UtilsBase, SocketsInterface):
                             if key.data is None:
                                 accept_wrapper(key.fileobj, self)
                             else:
-                                if srv.get("handler", None):
-                                    srv.get("handler")(
+                                if socket_object.get("handler", None):
+                                    socket_object.get("handler")(
                                         key, mask, socket_object, self)
                                 else:
-                                    service_connection(key, mask, sel, self)
+                                    service_connection(key, mask, socket_object, self)
                 except KeyboardInterrupt:
                     print("Caught keyboard interrupt, exiting")
                     sys.exit(0)
@@ -2413,6 +2418,9 @@ class SocketsBase(UtilsBase, SocketsInterface):
                     sel.close()
 
         print("Server connection to client closed")
+        if socket_object.get("close_server", True):
+            print("Server socket object being closed")
+            srv.close()
         socket_object.update({"server": srv, "selectors": sel})
         return self.update(socket_object)
 
@@ -2426,9 +2434,10 @@ class SocketsBase(UtilsBase, SocketsInterface):
         sel = selectors.DefaultSelector()
         blocking = socket_object.get("blocking", False)
 
-        def service_connection(key, mask, self):
+        def service_connection(key, mask, socket_object, self):
             sock = key.fileobj
             data = key.data
+            sel = socket_object.get("selectors")
             if mask & selectors.EVENT_READ:
                 recv_data = sock.recv(1024)  # Should be ready to read
                 if recv_data:
@@ -2469,7 +2478,7 @@ class SocketsBase(UtilsBase, SocketsInterface):
                 events = sel.select(timeout=1)
                 if events:
                     for key, mask in events:
-                        service_connection(key, mask, self)
+                        service_connection(key, mask, socket_object, self)
                 # Check for a socket being monitored to continue.
                 if not sel.get_map():
                     break
@@ -2483,11 +2492,18 @@ class SocketsBase(UtilsBase, SocketsInterface):
         socket_object:
         messages
         """
-        sobject = self.fetch(socket_object.get("name"))
-        if not sobject:
-            sobject = self.socket_create(socket_object)
+        try:
+            sobject = self.fetch(socket_object.get("name"))
+            if not sobject:
+                raise Exception
+        except Exception as e:        
+            sres = self.socket_create(socket_object)    
+            if sres:
+                sobject = self.fetch(socket_object.get("name"))
+            else:
+                raise TypeError
         connections = sobject.get("numbers", 1)
-        server_addr = (sobject.get("host"), sobject.get("port"))
+        server_addr = ((sobject.get("host"), sobject.get("port")))
         sel = selectors.DefaultSelector()
         blocking = sobject.get("blocking", False)
         if connections == 0:
@@ -2505,6 +2521,7 @@ class SocketsBase(UtilsBase, SocketsInterface):
             #         s.get("server").close()
             #     except Exception:
             #         pass
+            print(sobject)
             sobject.get("handler")(messages, sobject, self)
             try:
                 sobject.get("server").close()
@@ -2512,7 +2529,6 @@ class SocketsBase(UtilsBase, SocketsInterface):
                 pass
         else:
             o = sobject
-            o["selectors"] = sel
             self.socket_multi_server_connect(o, messages)
 
     def socket_close(self, socket_name):
