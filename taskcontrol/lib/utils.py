@@ -2281,9 +2281,12 @@ class SocketsBase(UtilsBase, SocketsInterface):
         """
         socket: 
         """
+        """
+        "event_read_handler", "event_write_handler"
+        """
         self.v = {
             "create": ["name", "protocol", "streammode", "host", "port", "numbers", "handler", "blocking", "nonblocking_data", "nonblocking_timeout", "server", "close_server"],
-            "add": ["name", "protocol", "streammode", "host", "port", "numbers", "handler", "blocking", "nonblocking_data", "nonblocking_timeout", "workflow_kwargs", "server", "close_server"],
+            "add": ["name", "protocol", "streammode", "host", "port", "numbers", "handler", "blocking", "nonblocking_data", "nonblocking_timeout", "server", "workflow_kwargs", "close_server"],
             "fetch": ["name"],
             "update": ["name"],
             "delete": ["name"]
@@ -2319,8 +2322,9 @@ class SocketsBase(UtilsBase, SocketsInterface):
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         srv.listen(socket_object.get("numbers", 1))
         srv.setblocking(blocking)
+        events = selectors.EVENT_READ | selectors.EVENT_WRITE
         if not blocking:
-            sel.register(srv, selectors.EVENT_READ, data=None)
+            sel.register(srv, events, data=None)
         socket_object.update({"server": srv, "selectors": sel})
         self.socket_accept(socket_object)
         return True
@@ -2332,12 +2336,10 @@ class SocketsBase(UtilsBase, SocketsInterface):
         srv = socket_object.get("server")
         sel = socket_object.get("selectors")
         blocking = socket_object.get("blocking")
-        print(socket_object)
         while True and srv:
             if blocking:
                 try:
                     conn, addr = srv.accept()
-
                     # IMPORTANT NOTES
                     # Sending, Receiving data is Handlers work
                     # Closing connection is Handlers work
@@ -2355,67 +2357,129 @@ class SocketsBase(UtilsBase, SocketsInterface):
                 except Exception as e:
                     raise e
             else:
-                def accept_wrapper(sock, self):
+
+                def accept_wrapper(sock, host, port, self):
                     try:
+                        messages = [(str(host)+":"+str(port) +
+                                     ":").encode(), b"process"]
                         # Should be ready to read
-                        conn, addr = sock.accept()  # Should be ready to read
-                        print("Accepted connection from ", addr)
-                        # conn.setblocking(False)
+                        conn, addr = sock.accept()
+                        print("accepted connection from", addr)
+                        conn.setblocking(False)
                         data = types.SimpleNamespace(
-                            addr=addr, inb=b"", outb=b"")
+                            host=host,
+                            port=port,
+                            addr=addr,
+                            recv_total=0,
+                            sent_total=0,
+                            messages=list(messages),
+                            inb=b"",
+                            outb=b"",
+                            before_hook=None,
+                            after_hook_before_socket_close=None,
+                            after_hook_after_socket_close=None,
+                        )
                         events = selectors.EVENT_READ | selectors.EVENT_WRITE
                         sel.register(conn, events, data=data)
                         return True
                     except Exception as e:
-                        print("Error in service connection: accept_wrapper")
-                        # raise e
+                        print("Error in service connection: accept_wrapper", e)
                         return False
 
-                def service_connection(key, mask, socket_object, self):
+                def service_connection(key, mask, sel, socket_object, self):
                     try:
+                        def before_hook(sock, data, mask):
+                            print("before_hook")
+                            return []
+
+                        def after_hook_before_socket_close(sock, data, mask):
+                            print("after_hook_before_socket_close")
+                            return []
+
+                        def after_hook_after_socket_close(sock, data, mask):
+                            print("after_hook_after_socket_close")
+                            return []
+
+                        def process_data(key, mask, d=b"exit"):
+                            print("Client Data Received", d)
+                            dt = [b"Hello from server."]
+                            dt += [b"exit"]
+                            return dt
+
                         sock = key.fileobj
                         data = key.data
-                        sel = socket_object.get("selectors")
+                        ex = False
+
+                        if not data.inb and not data.outb:
+                            key.data.before_hook = before_hook(
+                                sock, data, mask)
+
                         if mask & selectors.EVENT_READ:
-                            # Should be ready to read
                             recv_data = sock.recv(1024)
+                            print("received", repr(recv_data),
+                                  "from connection", data.addr)
+
                             if recv_data:
-                                data.outb += recv_data
-                            else:
-                                print("closing connection to", data.addr)
+                                data.inb += recv_data
+                                if (recv_data.decode() == "process" or "process" in recv_data.decode()):
+                                    data.messages += list(process_data(key,
+                                                          mask, data.inb))
+
+                            if not recv_data and not data.messages:
+                                print("closing connection", data.addr)
+                                key.data.after_hook_before_socket_close = after_hook_before_socket_close(
+                                    sock, data, mask)
                                 sel.unregister(sock)
                                 sock.close()
+                                key.data.after_hook_after_socket_close = after_hook_after_socket_close(
+                                    sock, data, mask)
+
+                            if (recv_data.decode() == "exit" or "exit" in recv_data.decode()):
+                                ex = True
+
                         if mask & selectors.EVENT_WRITE:
+                            if not data.messages and ex:
+                                print("closing connection", data.addr)
+                                key.data.after_hook_before_socket_close = after_hook_before_socket_close(
+                                    sock, data, mask)
+                                sel.unregister(sock)
+                                sock.close()
+                                key.data.after_hook_after_socket_close = after_hook_after_socket_close(
+                                    sock, data, mask)
+
+                            if not data.outb and data.messages:
+                                data.outb = data.messages.pop(0)
+
                             if data.outb:
-                                print("echoing", repr(
-                                    data.outb), "to", data.addr)
-                                # Should be ready to write
+                                print("echoing", data.outb, "to", data.addr)
                                 sent = sock.send(data.outb)
                                 data.outb = data.outb[sent:]
-                            # sock.close()
-                            # return False
                         return True
                     except Exception as e:
-                        print("Error in service connection: service_connection")
-                        # raise e
+                        print("Error in service connection: service_connection ", e)
                         return False
                 try:
                     while True:
                         events = sel.select(timeout=None)
                         for key, mask in events:
                             if key.data is None:
-                                accept_wrapper(key.fileobj, self)
+                                accept_wrapper(key.fileobj, socket_object.get(
+                                    "host"), socket_object.get("port"), self)
                             else:
                                 if socket_object.get("handler", None):
                                     socket_object.get("handler")(
-                                        key, mask, socket_object, self)
+                                        key, mask, sel, socket_object, self)
                                 else:
-                                    service_connection(key, mask, socket_object, self)
+                                    service_connection(
+                                        key, mask, sel, socket_object, self)
                 except KeyboardInterrupt:
                     print("Caught keyboard interrupt, exiting")
                     sys.exit(0)
+                except Exception as e:
+                    print("Caught Unknown Error, exiting", e)
+                    sys.exit(0)
                 finally:
-                    sel.close()
+                    pass
 
         print("Server connection to client closed")
         if socket_object.get("close_server", True):
@@ -2424,39 +2488,117 @@ class SocketsBase(UtilsBase, SocketsInterface):
         socket_object.update({"server": srv, "selectors": sel})
         return self.update(socket_object)
 
-    def socket_multi_server_connect(self, socket_object, messages=[]):
+    def socket_multi_server_connect(self, socket_object=None, messages=[], instance_object=None):
         """
         socket_object:
         messages:
         """
         connections = socket_object.get("numbers", 1)
+        # if len(messages) < connections:
+        #     connections = len(messages)
         server_addr = (socket_object.get("host"), socket_object.get("port"))
         sel = selectors.DefaultSelector()
         blocking = socket_object.get("blocking", False)
 
-        def service_connection(key, mask, socket_object, self):
+        def service_read_write_connection(key, mask, socket_object, messages, instance_object):
             sock = key.fileobj
             data = key.data
             sel = socket_object.get("selectors")
             if mask & selectors.EVENT_READ:
-                recv_data = sock.recv(1024)  # Should be ready to read
+                recv_data = sock.recv(1024)
                 if recv_data:
-                    print("Received ", repr(recv_data),
-                          " from connection ", data.connid)
+                    print("Received data to connection ", data.connid)
+                    read_result = socket_object.get("handler").get("client_event_read")(
+                        key, mask, data, socket_object, messages, instance_object)
                     data.recv_total += len(recv_data)
                 if not recv_data or data.recv_total == data.msg_total:
                     print("Closing connection ", data.connid)
-                    sel.unregister(sock)
-                    sock.close()
+                    # sel.unregister(sock)
+                    # sock.close()
+
             if mask & selectors.EVENT_WRITE:
                 if not data.outb and data.messages:
                     data.outb = data.messages.pop(0)
                 if data.outb:
-                    print("Sending ", repr(data.outb),
-                          " to connection ", data.connid)
-                    # Should be ready to write
+                    print("Sending data to connection ", data.connid)
+                    write_result = socket_object.get("handler").get("client_event_write")(
+                        key, mask, data, read_result, socket_object, messages, instance_object)
+                    data.outb = b""
+            return socket_object, data, {"read_result": read_result, "write_result": write_result}
+
+        def service_connection(key, mask, sel, socket_object, messages, instance_object):
+            """
+            Applies for numbers > 1
+            """
+
+            def before_hook(sock, data, mask):
+                print("before_hook")
+                return []
+
+            def after_hook_before_close(sock, data, mask):
+                print("after_hook_before_close")
+                return []
+
+            def after_hook_after_close(sock, data, mask):
+                print("after_hook_after_close")
+                return []
+
+            def process_data(key, mask, d=b"exit"):
+                print("Server Data Received", d)
+                dt = []
+                dt += [b"exit"]
+                return dt
+
+            result = None
+            sock = key.fileobj
+            data = key.data
+            ex = False
+
+            if not data.inb and not data.outb:
+                key.data.before_hook = before_hook(sock, data, mask)
+
+            if mask & selectors.EVENT_READ:
+                recv_data = sock.recv(1024)
+
+                if recv_data:
+                    print("received", repr(recv_data),
+                          "from connection", data.connid)
+                    data.recv_total += len(recv_data)
+                    data.inb += recv_data
+                    if (recv_data.decode() == "process" or "process" in recv_data.decode()):
+                        data.messages += list(process_data(key,
+                                              mask, data.inb))
+
+                if not recv_data and not data.messages and socket_object.get("close_server", True):
+                    print("closing connection", data.connid)
+                    key.data.after_hook_before_close = after_hook_before_close(
+                        sock, data, mask)
+                    sel.unregister(sock)
+                    sock.close()
+                    key.data.after_hook_after_close = after_hook_after_close(
+                        sock, data, mask)
+
+                if (recv_data.decode() == "exit" or "exit" in recv_data.decode()):
+                    ex = True
+
+            if mask & selectors.EVENT_WRITE:
+                if not data.messages and ex and socket_object.get("close_server", True):
+                    print("closing connection", data.connid)
+                    key.data.after_hook_before_close = after_hook_before_close(
+                        sock, data, mask)
+                    sel.unregister(sock)
+                    sock.close()
+                    key.data.after_hook_after_close = after_hook_after_close(
+                        sock, data, mask)
+
+                if not data.outb and data.messages:
+                    data.outb = data.messages.pop(0)
+
+                if data.outb and data.inb:
+                    print("sending", data.outb, "to connection", data.connid)
                     sent = sock.send(data.outb)
                     data.outb = data.outb[sent:]
+            return socket_object, data, result
 
         for i in range(0, connections):
             connid = i + 1
@@ -2467,69 +2609,73 @@ class SocketsBase(UtilsBase, SocketsInterface):
             events = selectors.EVENT_READ | selectors.EVENT_WRITE
             data = types.SimpleNamespace(
                 connid=connid,
-                msg_total=sum(len(m) for m in messages),
+                host=socket_object.get("host"),
+                port=socket_object.get("port"),
+                addr=socket_object.get("port"),
                 recv_total=0,
+                sent_total=0,
                 messages=list(messages),
+                inb=b"",
                 outb=b"",
+                before_hook=None,
+                after_hook_before_close=None,
+                after_hook_after_close=None,
             )
             sel.register(sock, events, data=data)
+            socket_object["selectors"] = sel
         try:
             while True:
                 events = sel.select(timeout=1)
                 if events:
                     for key, mask in events:
-                        service_connection(key, mask, socket_object, self)
+
+                        if socket_object.get("handler", False) or callable(callable(socket_object.get("handler"))):
+                            socket_object, data, result = socket_object.get("handler")(
+                                key, mask, sel, socket_object, messages, instance_object)
+                        elif type(socket_object.get("handler", False)) == dict:
+                            socket_object, data, result = service_read_write_connection(
+                                key, mask, sel, socket_object, messages, instance_object)
+                        else:
+                            socket_object, data, result = service_connection(
+                                key, mask, sel, socket_object, messages, instance_object)
+                else:
+                    break
                 # Check for a socket being monitored to continue.
                 if not sel.get_map():
                     break
         except KeyboardInterrupt:
             print("Caught keyboard interrupt, exiting")
+        except Exception as e:
+            print("Uncaught error, exiting", e)
         finally:
-            sel.close()
+            if socket_object.get("close_server", True):
+                sel.close()
+                sys.exit(1)
 
-    def socket_connect(self, socket_object, messages=[]):
+    def socket_connect(self, socket_object, messages=[b"Hello from Client.", b"process"]):
         """
         socket_object:
         messages
         """
-        try:
-            sobject = self.fetch(socket_object.get("name"))
-            if not sobject:
-                raise Exception
-        except Exception as e:        
-            sres = self.socket_create(socket_object)    
-            if sres:
-                sobject = self.fetch(socket_object.get("name"))
-            else:
-                raise TypeError
+        sobject = socket_object
         connections = sobject.get("numbers", 1)
         server_addr = ((sobject.get("host"), sobject.get("port")))
         sel = selectors.DefaultSelector()
         blocking = sobject.get("blocking", False)
         if connections == 0:
             raise ValueError
-        elif connections < 2:
-            # if s:
-            #     # s = self.fetch(socket_object.get("name"))
-            #     # srv = s.get("server")
-            #     # srv.connect(server_addr)
-            #     # srv.sendall(b"Hello, world from client")
-            #     # data = srv.recv(1024)
-            #     # print("Received ", str(data))
-            #     s.get("handler")(messages, s)
-            #     try:
-            #         s.get("server").close()
-            #     except Exception:
-            #         pass
-            print(sobject)
-            sobject.get("handler")(messages, sobject, self)
+        elif connections < 2 and blocking == True:
+            if not callable(sobject.get("handler")):
+                raise TypeError
             try:
+                sobject.get("handler")(sobject, messages, self)
                 sobject.get("server").close()
             except Exception:
                 pass
+        elif connections >= 2 and blocking == True:
+            raise ValueError
         else:
-            o = sobject
-            self.socket_multi_server_connect(o, messages)
+            return self.socket_multi_server_connect(sobject, messages, self)
 
     def socket_close(self, socket_name):
         """
