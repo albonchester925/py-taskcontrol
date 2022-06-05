@@ -150,5 +150,5 @@ ctests.py
 documentor/
 *.bak
 taskcontrol.egg-info
-client.py
-ctests.py
+./client.py
+
